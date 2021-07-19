@@ -1,0 +1,11 @@
+[package]
+name = "corn-on-the-cob"
+version = "0.1.0"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm10-0"] }
+clap = {version = "2"}
+json = {version = "0.12"}
