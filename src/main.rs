@@ -35,14 +35,12 @@ fn main() {
         .help("target triplet")
         .get_matches();
     {
-        let mut ctx = Context::create();
+
         let mut compiler_object = compiler::CompilerObject::new(
             args.value_of("infile").expect("Could not get infile!"),
-            args.value_of("outfile").expect("Could not get outfile!"),
             args.value_of("target").expect("Could not get target!"),
-            &mut ctx
         );
-        compiler_object.compile();
+        compiler_object.compile(args.value_of("outfile").expect("Could not get outfile!"));
     }
     println!("Hello, world!");
 }

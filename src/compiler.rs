@@ -16,10 +16,9 @@ use std::borrow::Borrow;
 
 pub struct CompilerObject<'a> {
     target_machine: TargetMachine,
-    context: &'a mut Context,
+    context: Context,
     builder: Builder<'a>,
     tree: JsonValue,
-    module: Module<'a>,
 }
 fn get_cpu(from: &str) -> &str {
     let things = from.split("-").collect::<Vec<&str>>();
@@ -28,18 +27,18 @@ fn get_cpu(from: &str) -> &str {
         n => n
     }
 }
-struct LocalContextTree<'a> {
-    outer: Option<&'a LocalContextTree<'a>>,
-    context: HashMap<&'a str, BasicValueEnum<'a>>
+struct LocalContextTree<'c> {
+    outer: Option<&'c LocalContextTree<'c>>,
+    context: HashMap<&'c str, BasicValueEnum<'c>>
 }
 struct CompleteContext<'l, 'g> {
     local: LocalContextTree<'l>,
     global: &'g HashMap<&'g str, GlobalValue<'g>>
 }
 impl<'a> CompilerObject<'a> {
-    pub fn new(infile: &str, outfile: &str, target: &str, ctx: &'a mut Context) -> Self {
+    pub fn new(infile: &str, target: &str) -> Self {
+        let mut ctx = Context::create();
         Target::initialize_all(&InitializationConfig::default());
-        let module = ctx.create_module("text");
         let triple_str = target;
         let triple = TargetTriple::create(triple_str);
         let target =  Target::from_triple(&triple).expect("Could not get target!");
@@ -53,8 +52,6 @@ impl<'a> CompilerObject<'a> {
             RelocMode::Default,
             CodeModel::Default
         ).expect("Could not get target machine!");
-        let output_filename = outfile;
-        target_machine.write_to_file(&module, FileType::Object, output_filename.as_ref());
         let input_filename = infile;
         let mut data = String::new();
         {
@@ -70,7 +67,6 @@ impl<'a> CompilerObject<'a> {
             context: ctx,
             builder,
             tree: code,
-            module,
         }
     }
     fn parse_type(&self, t: &JsonValue, addr:AddressSpace, typelen: Option<usize>) -> Result<AnyTypeEnum, &str> {
@@ -195,7 +191,7 @@ impl<'a> CompilerObject<'a> {
         };
         self.parse_type_basic(&t["type"], addr, typelen)
     }
-    fn get_value<'ct>(&'ct self, target: &JsonValue, context: &'ct CompleteContext<'a, 'ct>) -> BasicValueEnum<'ct> {
+    fn get_value<'ct>(&'ct self, target: &JsonValue, context: &'ct CompleteContext<'ct, 'a>) -> BasicValueEnum<'ct> {
         match target["act"].as_str().expect("Could not parse value!") {
             "const" => {
                 match &self.parse_type_basic_wrapper(&target["type"], AddressSpace::Generic).expect("Could not get value!") {
@@ -405,8 +401,7 @@ impl<'a> CompilerObject<'a> {
         }
         panic!("Undefined value \"{}\"!", name);
     }
-    fn build_body<'c>(&mut self, function_value:&FunctionValue, complete_context:CompleteContext<'a, 'c>, body:&JsonValue, depth: usize) {
-        let mut current_context = complete_context.local.context;
+    fn build_body<'s, 'c>(&'s mut self, function_value:&FunctionValue, mut complete_context:CompleteContext<'c, 's>, body:&'s JsonValue, depth: usize) {
         match body {
             JsonValue::Object(o) => {
                 //this is a singular command
@@ -417,7 +412,7 @@ impl<'a> CompilerObject<'a> {
                         let init_type = init_value.get_type();
                         let var_addr = self.builder.build_alloca(init_type, format!("ALLOC_VAR {}", var_name).as_str());
                         self.builder.build_store(var_addr, init_value);
-                        current_context[var_name] = var_addr.as_basic_value_enum();
+                        complete_context.local.context.insert(var_name, var_addr.as_basic_value_enum());
                     }
                     "call" => {
                         let fun = complete_context.global[body["name"].as_str().expect("Could not get function name!")].as_any_value_enum().into_function_value();
@@ -491,7 +486,10 @@ impl<'a> CompilerObject<'a> {
                             "return" => {
                                 self.builder.build_return(match body["args"].members().next() {
                                     None => None,
-                                    Some(v) => Some(&self.get_value(v, &complete_context) as &dyn BasicValue)
+                                    Some(v) => {
+                                        let val = self.get_value(v, &complete_context);
+                                        Some(&val as &dyn BasicValue)
+                                    }
                                 });
                             }
                             unknown => panic!("Unknown statement type {} !", unknown)
@@ -520,7 +518,9 @@ impl<'a> CompilerObject<'a> {
             _ => panic!("Invalid body!")
         }
     }
-    pub fn compile(&mut self) {
+    pub fn compile(&mut self, outfile: &str) {
+        let module = self.context.create_module("text");
+        self.target_machine.write_to_file(&module, FileType::Object, outfile.as_ref());
         let body = &self.tree["globals"];
         let mut global:HashMap<&str, GlobalValue> = HashMap::new();
         //Pass 1 - parse global values, get definitions
@@ -548,13 +548,13 @@ impl<'a> CompilerObject<'a> {
                         AnyTypeEnum::VectorType(t) => Ok(t.fn_type(arg_array, false)),
                         AnyTypeEnum::VoidType(t) => Ok(t.fn_type(arg_array, false)),
                     }.expect("Could not create function type!");
-                    let function = self.module.add_function(entry["name"].as_str().expect("Could not get function name!"), fn_type, Some(Linkage::External))
+                    let function = module.add_function(entry["name"].as_str().expect("Could not get function name!"), fn_type, Some(Linkage::External))
                         .as_global_value();
                     global.insert(key.clone(), function);
                 }
                 "glbdef" => {
                     let var_type = self.parse_type_basic_wrapper(&entry["type"],AddressSpace::Generic).expect("Could not parse type!");
-                    let var = self.module.add_global(var_type, Some(AddressSpace::Global), entry["name"].as_str().expect("Could not get variable name!"));
+                    let var = module.add_global(var_type, Some(AddressSpace::Global), entry["name"].as_str().expect("Could not get variable name!"));
                     var.set_initializer(&self.get_value(&entry["body"], &CompleteContext {
                         local: LocalContextTree {
                             outer: None,
